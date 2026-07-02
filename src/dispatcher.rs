@@ -89,7 +89,8 @@ pub(crate) fn salvage_updates(input: &str) -> (Vec<Update>, Option<i64>) {
     let mut next_offset: Option<i64> = None;
     for item in items {
         if let Some(id) = item.get("update_id").and_then(serde_json::Value::as_i64) {
-            next_offset = Some(next_offset.map_or(id, |cur| cur.max(id)).saturating_add(1));
+            let next = id.saturating_add(1);
+            next_offset = Some(next_offset.map_or(next, |cur| cur.max(next)));
         }
         match serde_json::from_value::<Update>(item.clone()) {
             Ok(update) => updates.push(update),

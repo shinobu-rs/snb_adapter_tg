@@ -38,3 +38,16 @@ fn huge_update_id_saturates_instead_of_panicking() {
     let (_updates, next_offset) = salvage_updates(input);
     assert_eq!(next_offset, Some(i64::MAX)); // saturated, no panic
 }
+
+#[test]
+fn out_of_order_ids_do_not_overshoot_offset() {
+    // A protocol-violating body may deliver ids out of order; the offset must
+    // still be exactly max(update_id) + 1, not inflated per element.
+    let input = r#"{"ok":true,"result":[
+        {"update_id":101,"message":{"message_id":1,"date":0,"chat":{"id":5,"type":"private"},"text":"a"}},
+        {"update_id":100,"message":{"message_id":2,"date":0,"chat":{"id":5,"type":"private"},"text":"b"}}
+    ]}"#;
+    let (updates, next_offset) = salvage_updates(input);
+    assert_eq!(updates.len(), 2);
+    assert_eq!(next_offset, Some(102));
+}
