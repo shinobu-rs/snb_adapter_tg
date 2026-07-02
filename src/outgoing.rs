@@ -22,6 +22,14 @@ use snb_core::event::{
 use crate::state;
 
 pub(crate) fn send_event(event: &Event) -> anyhow::Result<()> {
+    // Adapter-local action channel: Other("tg:<method>") events targeted at
+    // this adapter carry Bot API params JSON in event.data.
+    if let EventType::Other(kind) = &event.event_type {
+        if let Some(method) = kind.strip_prefix("tg:") {
+            return crate::actions::dispatch(method, event);
+        }
+        return Ok(());
+    }
     let Some(msg) = &event.message else {
         return Ok(());
     };

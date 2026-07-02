@@ -4,6 +4,7 @@
 //! incoming updates into [`Event`](snb_core::event::Event)s. Requires a bot
 //! token configured in `configs/TGAdapter/config.toml`.
 
+mod actions;
 mod commands;
 mod config;
 mod convert;
