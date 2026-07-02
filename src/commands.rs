@@ -1,6 +1,7 @@
+use frankenstein::AsyncTelegramApi;
+use frankenstein::methods::SetMyCommandsParams;
+use frankenstein::types::{BotCommand, BotCommandScope, BotCommandScopeChat};
 use snb_core::command::{CommandSpec, CommandVisibility};
-use teloxide::prelude::*;
-use teloxide::types::{BotCommand, BotCommandScope, ChatId, Recipient};
 
 use crate::state;
 
@@ -47,7 +48,10 @@ pub(crate) fn partition_commands(specs: &[CommandSpec]) -> MenuCommands {
             );
             continue;
         }
-        let command = BotCommand::new(spec.name.clone(), spec.description.clone());
+        let command = BotCommand::builder()
+            .command(spec.name.clone())
+            .description(spec.description.clone())
+            .build();
         match spec.visibility {
             CommandVisibility::Public => {
                 menu.default.push(command.clone());
@@ -73,11 +77,11 @@ pub(crate) fn sync_commands() {
     let admin_ids = state::admin_ids();
 
     crate::task::spawn(async move {
-        if let Err(e) = bot
-            .set_my_commands(menu.default)
+        let params = SetMyCommandsParams::builder()
+            .commands(menu.default)
             .scope(BotCommandScope::Default)
-            .await
-        {
+            .build();
+        if let Err(e) = bot.set_my_commands(&params).await {
             log::warn!("TGAdapter set_my_commands (default scope) failed: {e}");
         }
 
@@ -86,10 +90,14 @@ pub(crate) fn sync_commands() {
                 log::warn!("TGAdapter skipping non-numeric admin id '{id}' for command scope");
                 continue;
             };
-            let scope = BotCommandScope::Chat {
-                chat_id: Recipient::Id(ChatId(chat_id)),
-            };
-            if let Err(e) = bot.set_my_commands(menu.admin.clone()).scope(scope).await {
+            let scope = BotCommandScope::Chat(
+                BotCommandScopeChat::builder().chat_id(chat_id).build(),
+            );
+            let params = SetMyCommandsParams::builder()
+                .commands(menu.admin.clone())
+                .scope(scope)
+                .build();
+            if let Err(e) = bot.set_my_commands(&params).await {
                 // A "chat not found" here means the admin has not started a DM
                 // with the bot yet; the next sync (or their first message) fixes it.
                 log::warn!("TGAdapter set_my_commands for admin {chat_id} failed: {e}");

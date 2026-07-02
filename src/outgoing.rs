@@ -1,15 +1,22 @@
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use anyhow::Context as _;
 use base64::{Engine as _, engine::general_purpose};
+use frankenstein::AsyncTelegramApi;
+use frankenstein::ParseMode;
+use frankenstein::client_reqwest::Bot;
+use frankenstein::input_file::FileUpload;
+use frankenstein::input_media::{InputMediaDocument, MediaGroupInputMedia};
+use frankenstein::methods::{
+    DeleteMessageParams, EditMessageTextParams, SendDocumentParams, SendMediaGroupParams,
+    SendMessageParams, SendPhotoParams,
+};
+use frankenstein::types::ReplyParameters;
 use snb_core::context;
 use snb_core::event::{
     ContentItem, Event, EventType, FileSource, ImageSource, Message, TextFormat,
-};
-use teloxide::prelude::*;
-use teloxide::types::{
-    ChatId, FileId, InputFile, InputMedia, InputMediaDocument, MessageId, ParseMode,
-    ReplyParameters,
 };
 
 use crate::state;
@@ -218,18 +225,18 @@ async fn send_text(
     text: FormattedPayload,
     reply_to: Option<&str>,
     delete_after: Option<Duration>,
-) -> Vec<MessageId> {
-    let mut req = bot.send_message(ChatId(chat_id), text.text);
-    if let Some(parse_mode) = text.format.map(parse_mode_from_format) {
-        req = req.parse_mode(parse_mode);
-    }
-    if let Some(reply) = reply_parameters(reply_to) {
-        req = req.reply_parameters(reply);
-    }
-    match req.await {
-        Ok(sent) => {
-            schedule_delete_after(bot, chat_id, sent.id, delete_after);
-            vec![sent.id]
+) -> Vec<i32> {
+    let params = SendMessageParams::builder()
+        .chat_id(chat_id)
+        .text(text.text)
+        .maybe_parse_mode(text.format.map(parse_mode_from_format))
+        .maybe_reply_parameters(reply_parameters(reply_to))
+        .build();
+    match bot.send_message(&params).await {
+        Ok(resp) => {
+            let id = resp.result.message_id;
+            schedule_delete_after(bot, chat_id, id, delete_after);
+            vec![id]
         }
         Err(e) => {
             log::error!("TGAdapter send_message error: {e}");
@@ -247,29 +254,30 @@ async fn send_file(
     caption: Option<FormattedPayload>,
     reply_to: Option<&str>,
     delete_after: Option<Duration>,
-) -> Vec<MessageId> {
-    let input = match input_file_from_source(source, file_name, file_id) {
-        Ok(input) => input,
+) -> Vec<i32> {
+    let (upload, cleanup) = match file_upload_from_source(source, file_name, file_id) {
+        Ok(prepared) => prepared,
         Err(e) => {
             log::error!("TGAdapter cannot prepare file: {e:#}");
             return Vec::new();
         }
     };
 
-    let mut req = bot.send_document(ChatId(chat_id), input);
-    if let Some(caption) = caption {
-        if let Some(parse_mode) = caption.format.map(parse_mode_from_format) {
-            req = req.parse_mode(parse_mode);
-        }
-        req = req.caption(caption.text);
-    }
-    if let Some(reply) = reply_parameters(reply_to) {
-        req = req.reply_parameters(reply);
-    }
-    match req.await {
-        Ok(sent) => {
-            schedule_delete_after(bot, chat_id, sent.id, delete_after);
-            vec![sent.id]
+    let (caption_text, caption_mode) = split_caption(caption);
+    let params = SendDocumentParams::builder()
+        .chat_id(chat_id)
+        .document(upload)
+        .maybe_caption(caption_text)
+        .maybe_parse_mode(caption_mode)
+        .maybe_reply_parameters(reply_parameters(reply_to))
+        .build();
+    let result = bot.send_document(&params).await;
+    cleanup_outbox(cleanup.as_deref());
+    match result {
+        Ok(resp) => {
+            let id = resp.result.message_id;
+            schedule_delete_after(bot, chat_id, id, delete_after);
+            vec![id]
         }
         Err(e) => {
             log::error!("TGAdapter send_document error: {e}");
@@ -286,29 +294,30 @@ async fn send_image(
     caption: Option<FormattedPayload>,
     reply_to: Option<&str>,
     delete_after: Option<Duration>,
-) -> Vec<MessageId> {
-    let input = match input_file_from_image(source, file_id) {
-        Ok(input) => input,
+) -> Vec<i32> {
+    let (upload, cleanup) = match file_upload_from_image(source, file_id) {
+        Ok(prepared) => prepared,
         Err(e) => {
             log::error!("TGAdapter cannot prepare image: {e:#}");
             return Vec::new();
         }
     };
 
-    let mut req = bot.send_photo(ChatId(chat_id), input);
-    if let Some(caption) = caption {
-        if let Some(parse_mode) = caption.format.map(parse_mode_from_format) {
-            req = req.parse_mode(parse_mode);
-        }
-        req = req.caption(caption.text);
-    }
-    if let Some(reply) = reply_parameters(reply_to) {
-        req = req.reply_parameters(reply);
-    }
-    match req.await {
-        Ok(sent) => {
-            schedule_delete_after(bot, chat_id, sent.id, delete_after);
-            vec![sent.id]
+    let (caption_text, caption_mode) = split_caption(caption);
+    let params = SendPhotoParams::builder()
+        .chat_id(chat_id)
+        .photo(upload)
+        .maybe_caption(caption_text)
+        .maybe_parse_mode(caption_mode)
+        .maybe_reply_parameters(reply_parameters(reply_to))
+        .build();
+    let result = bot.send_photo(&params).await;
+    cleanup_outbox(cleanup.as_deref());
+    match result {
+        Ok(resp) => {
+            let id = resp.result.message_id;
+            schedule_delete_after(bot, chat_id, id, delete_after);
+            vec![id]
         }
         Err(e) => {
             log::error!("TGAdapter send_photo error: {e}");
@@ -324,7 +333,7 @@ async fn send_file_media_groups(
     mut caption: Option<FormattedPayload>,
     reply_to: Option<&str>,
     delete_after: Option<Duration>,
-) -> Vec<MessageId> {
+) -> Vec<i32> {
     let mut sent_ids = Vec::new();
     let mut chunk = Vec::new();
     for file in files {
@@ -361,7 +370,7 @@ async fn send_file_media_group(
     caption: Option<FormattedPayload>,
     reply_to: Option<&str>,
     delete_after: Option<Duration>,
-) -> Vec<MessageId> {
+) -> Vec<i32> {
     if files.len() == 1 {
         if let Some(ContentItem::File {
             source,
@@ -370,14 +379,7 @@ async fn send_file_media_group(
         }) = files.into_iter().next()
         {
             return send_file(
-                bot,
-                chat_id,
-                source,
-                file_name,
-                file_id,
-                caption,
-                reply_to,
-                delete_after,
+                bot, chat_id, source, file_name, file_id, caption, reply_to, delete_after,
             )
             .await;
         }
@@ -386,6 +388,7 @@ async fn send_file_media_group(
 
     let last_index = files.len() - 1;
     let mut media = Vec::with_capacity(files.len());
+    let mut cleanups: Vec<PathBuf> = Vec::new();
     for (idx, file) in files.into_iter().enumerate() {
         let ContentItem::File {
             source,
@@ -395,35 +398,52 @@ async fn send_file_media_group(
         else {
             unreachable!();
         };
-        let input = match input_file_from_source(source, file_name, file_id) {
-            Ok(input) => input,
+        let (upload, cleanup) = match file_upload_from_source(source, file_name, file_id) {
+            Ok(prepared) => prepared,
             Err(e) => {
                 log::error!("TGAdapter cannot prepare file: {e:#}");
+                for c in &cleanups {
+                    cleanup_outbox(Some(c.as_path()));
+                }
                 return Vec::new();
             }
         };
-        let mut document = InputMediaDocument::new(input);
-        if idx == last_index
-            && let Some(caption) = caption.clone()
-        {
-            if let Some(parse_mode) = caption.format.map(parse_mode_from_format) {
-                document = document.parse_mode(parse_mode);
-            }
-            document = document.caption(caption.text);
+        if let Some(c) = cleanup {
+            cleanups.push(c);
         }
-        media.push(InputMedia::Document(document));
+        // Album caption goes on the LAST item (preserves existing behavior).
+        // NOTE: never set `thumbnail` on media-group documents — frankenstein
+        // 0.50.1's attach:// replacement walk skips it and Telegram rejects
+        // the raw path object (source-verified).
+        let document = if idx == last_index && caption.is_some() {
+            let c = caption.clone().expect("checked is_some");
+            InputMediaDocument::builder()
+                .media(upload)
+                .caption(c.text)
+                .maybe_parse_mode(c.format.map(parse_mode_from_format))
+                .build()
+        } else {
+            InputMediaDocument::builder().media(upload).build()
+        };
+        media.push(MediaGroupInputMedia::Document(document));
     }
 
-    let mut req = bot.send_media_group(ChatId(chat_id), media);
-    if let Some(reply) = reply_parameters(reply_to) {
-        req = req.reply_parameters(reply);
+    let params = SendMediaGroupParams::builder()
+        .chat_id(chat_id)
+        .media(media)
+        .maybe_reply_parameters(reply_parameters(reply_to))
+        .build();
+    let result = bot.send_media_group(&params).await;
+    for c in &cleanups {
+        cleanup_outbox(Some(c.as_path()));
     }
-    match req.await {
-        Ok(sent) => sent
+    match result {
+        Ok(resp) => resp
+            .result
             .into_iter()
-            .map(|sent_message| {
-                schedule_delete_after(bot, chat_id, sent_message.id, delete_after);
-                sent_message.id
+            .map(|sent| {
+                schedule_delete_after(bot, chat_id, sent.message_id, delete_after);
+                sent.message_id
             })
             .collect(),
         Err(e) => {
@@ -437,7 +457,7 @@ fn emit_message_sent_if_needed(
     origin: &str,
     chat_id: i64,
     local_id: Option<&str>,
-    message_id: Option<MessageId>,
+    message_id: Option<i32>,
 ) {
     let (Some(local_id), Some(message_id)) = (local_id, message_id) else {
         return;
@@ -445,7 +465,7 @@ fn emit_message_sent_if_needed(
 
     let mut event = Event::message_sent(
         "TGAdapter",
-        message_id.0.to_string(),
+        message_id.to_string(),
         Some(local_id.to_string()),
     );
     if let Some(msg) = event.message.as_mut() {
@@ -480,11 +500,16 @@ async fn edit_message_item(bot: Bot, chat_id: i64, msg: Message) {
         return;
     };
 
-    let mut req = bot.edit_message_text(ChatId(chat_id), MessageId(message_id), payload.text);
-    if let Some(parse_mode) = payload.format.map(parse_mode_from_format) {
-        req = req.parse_mode(parse_mode);
-    }
-    if let Err(e) = req.await {
+    // All EditMessageTextParams fields are Option (10.x rich_message
+    // alternative) — the compiler will NOT catch a missing chat_id/message_id/
+    // text here, so keep all three setters together.
+    let params = EditMessageTextParams::builder()
+        .chat_id(chat_id)
+        .message_id(message_id)
+        .text(payload.text)
+        .maybe_parse_mode(payload.format.map(parse_mode_from_format))
+        .build();
+    if let Err(e) = bot.edit_message_text(&params).await {
         // Telegram returns an error when the new text is identical to the old
         // one; that is harmless for status updates, so only warn.
         log::warn!("TGAdapter edit_message error: {e}");
@@ -502,15 +527,16 @@ async fn delete_message_item(bot: Bot, chat_id: i64, msg: Message) {
         return;
     };
 
-    if let Err(e) = bot
-        .delete_message(ChatId(chat_id), MessageId(message_id))
-        .await
-    {
+    let params = DeleteMessageParams::builder()
+        .chat_id(chat_id)
+        .message_id(message_id)
+        .build();
+    if let Err(e) = bot.delete_message(&params).await {
         log::error!("TGAdapter delete_message error: {e}");
     }
 }
 
-fn schedule_delete_after(bot: &Bot, chat_id: i64, message_id: MessageId, delay: Option<Duration>) {
+fn schedule_delete_after(bot: &Bot, chat_id: i64, message_id: i32, delay: Option<Duration>) {
     let Some(delay) = delay else {
         return;
     };
@@ -518,7 +544,11 @@ fn schedule_delete_after(bot: &Bot, chat_id: i64, message_id: MessageId, delay: 
     let bot = bot.clone();
     crate::task::spawn(async move {
         tokio::time::sleep(delay).await;
-        if let Err(e) = bot.delete_message(ChatId(chat_id), message_id).await {
+        let params = DeleteMessageParams::builder()
+            .chat_id(chat_id)
+            .message_id(message_id)
+            .build();
+        if let Err(e) = bot.delete_message(&params).await {
             log::warn!("TGAdapter delete_after delete_message error: {e}");
         }
     });
@@ -548,62 +578,147 @@ fn merge_captions(
 #[allow(deprecated)]
 fn parse_mode_from_format(format: TextFormat) -> ParseMode {
     match format {
+        // Legacy Markdown is deprecated upstream but still accepted; policy:
+        // pass plugin-requested formats through unchanged.
         TextFormat::Markdown => ParseMode::Markdown,
         TextFormat::MarkdownV2 => ParseMode::MarkdownV2,
         TextFormat::Html => ParseMode::Html,
     }
 }
 
-fn reply_parameters(reply_to: Option<&str>) -> Option<ReplyParameters> {
-    let msg_id = reply_to?.parse::<i32>().ok()?;
-    Some(ReplyParameters {
-        message_id: MessageId(msg_id),
-        ..Default::default()
-    })
+fn split_caption(caption: Option<FormattedPayload>) -> (Option<String>, Option<ParseMode>) {
+    match caption {
+        Some(c) => {
+            let mode = c.format.map(parse_mode_from_format);
+            (Some(c.text), mode)
+        }
+        None => (None, None),
+    }
 }
 
-fn input_file_from_source(
+fn reply_parameters(reply_to: Option<&str>) -> Option<ReplyParameters> {
+    let msg_id = reply_to?.parse::<i32>().ok()?;
+    Some(ReplyParameters::builder().message_id(msg_id).build())
+}
+
+/// Prepare a `FileUpload` for a file source. Returns the upload plus an
+/// optional outbox path to delete after the send completes.
+///
+/// frankenstein has no in-memory upload and no file-name override (the
+/// multipart name is always the path basename, fetched with a panicking
+/// `.unwrap()` upstream) — so byte payloads and renames are materialized
+/// under `data/<plugin>/outbox/<unique>/<desired_name>`.
+fn file_upload_from_source(
     source: FileSource,
     file_name: Option<String>,
     file_id: Option<String>,
-) -> anyhow::Result<InputFile> {
-    let mut input = if let Some(file_id) = non_empty(file_id) {
-        InputFile::file_id(FileId(file_id))
-    } else {
-        match source {
-            FileSource::Id(file_id) => InputFile::file_id(FileId(file_id)),
-            FileSource::Path(path) => InputFile::file(path),
-            FileSource::Url(url) => InputFile::url(
-                url::Url::parse(&url).with_context(|| format!("invalid file URL: {url}"))?,
-            ),
-        }
-    };
-
-    if let Some(file_name) = non_empty(file_name) {
-        input = input.file_name(file_name);
+) -> anyhow::Result<(FileUpload, Option<PathBuf>)> {
+    if let Some(fid) = non_empty(file_id) {
+        return Ok((FileUpload::String(fid), None));
     }
-
-    Ok(input)
+    match source {
+        FileSource::Id(fid) => Ok((FileUpload::String(fid), None)),
+        // file_ids and HTTP URLs share FileUpload::String; Telegram
+        // disambiguates server-side.
+        FileSource::Url(url) => Ok((FileUpload::String(url), None)),
+        FileSource::Path(path) => {
+            let path = PathBuf::from(path);
+            let Some(basename) = path.file_name().and_then(|n| n.to_str()) else {
+                anyhow::bail!("file path has no usable basename: {}", path.display());
+            };
+            match non_empty(file_name) {
+                Some(name) if name != basename => {
+                    let out = outbox_copy(&path, &name)?;
+                    Ok((FileUpload::from(out.clone()), Some(out)))
+                }
+                _ => Ok((FileUpload::from(path), None)),
+            }
+        }
+    }
 }
 
-fn input_file_from_image(
+fn file_upload_from_image(
     source: ImageSource,
     file_id: Option<String>,
-) -> anyhow::Result<InputFile> {
-    if let Some(file_id) = non_empty(file_id) {
-        return Ok(InputFile::file_id(FileId(file_id)));
+) -> anyhow::Result<(FileUpload, Option<PathBuf>)> {
+    if let Some(fid) = non_empty(file_id) {
+        return Ok((FileUpload::String(fid), None));
     }
-
     match source {
-        ImageSource::Id(file_id) => Ok(InputFile::file_id(FileId(file_id))),
-        ImageSource::Url(url) => Ok(InputFile::url(
-            url::Url::parse(&url).with_context(|| format!("invalid image URL: {url}"))?,
-        )),
-        ImageSource::Path(path) => Ok(InputFile::file(path)),
-        ImageSource::Base64(data) => {
-            let bytes = decode_base64_image(&data)?;
-            Ok(InputFile::memory(bytes))
+        ImageSource::Id(fid) => Ok((FileUpload::String(fid), None)),
+        ImageSource::Url(url) => Ok((FileUpload::String(url), None)),
+        ImageSource::Path(path) => {
+            let path = PathBuf::from(path);
+            anyhow::ensure!(
+                path.file_name().is_some(),
+                "image path has no usable basename: {}",
+                path.display()
+            );
+            Ok((FileUpload::from(path), None))
         }
+        ImageSource::Base64(data) => {
+            let name = format!("image.{}", base64_image_extension(&data));
+            let bytes = decode_base64_image(&data)?;
+            let out = outbox_write(&name, &bytes)?;
+            Ok((FileUpload::from(out.clone()), Some(out)))
+        }
+    }
+}
+
+/// Best-effort extension from a data-URI prefix so Telegram's content-type
+/// detection sees something sensible; photos are re-encoded server-side anyway.
+fn base64_image_extension(data: &str) -> &'static str {
+    let prefix = data.split_once(',').map_or("", |(p, _)| p);
+    if prefix.contains("image/jpeg") || prefix.contains("image/jpg") {
+        "jpg"
+    } else if prefix.contains("image/webp") {
+        "webp"
+    } else if prefix.contains("image/gif") {
+        "gif"
+    } else {
+        "png"
+    }
+}
+
+static OUTBOX_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// A unique per-send subdirectory under the plugin's confined data namespace
+/// (never OS temp — outbox content is user data). The desired basename is
+/// preserved inside it because the basename is what Telegram displays.
+fn outbox_slot() -> anyhow::Result<PathBuf> {
+    let dir = context::plugin()
+        .data_dir()
+        .join("outbox")
+        .join(format!(
+            "{}-{}",
+            std::process::id(),
+            OUTBOX_SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+    std::fs::create_dir_all(&dir)
+        .with_context(|| format!("cannot create outbox dir {}", dir.display()))?;
+    Ok(dir)
+}
+
+fn outbox_write(name: &str, bytes: &[u8]) -> anyhow::Result<PathBuf> {
+    let path = outbox_slot()?.join(name);
+    std::fs::write(&path, bytes)
+        .with_context(|| format!("cannot write outbox file {}", path.display()))?;
+    Ok(path)
+}
+
+fn outbox_copy(src: &Path, name: &str) -> anyhow::Result<PathBuf> {
+    let path = outbox_slot()?.join(name);
+    std::fs::copy(src, &path)
+        .with_context(|| format!("cannot copy {} into outbox", src.display()))?;
+    Ok(path)
+}
+
+/// Remove an outbox file together with its unique slot directory. Best-effort:
+/// anything left behind is swept by the startup cleanup in `on_load`.
+fn cleanup_outbox(path: Option<&Path>) {
+    let Some(path) = path else { return };
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
 

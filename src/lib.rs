@@ -1,8 +1,8 @@
 //! Telegram adapter for the Shinobu bot framework.
 //!
-//! Connects to the Telegram Bot API via [`teloxide`] and converts incoming
-//! updates into [`Event`](snb_core::event::Event)s. Requires a bot token
-//! configured in `configs/TGAdapter/config.toml`.
+//! Connects to the Telegram Bot API (10.1) via [`frankenstein`] and converts
+//! incoming updates into [`Event`](snb_core::event::Event)s. Requires a bot
+//! token configured in `configs/TGAdapter/config.toml`.
 
 mod commands;
 mod config;
@@ -52,6 +52,10 @@ impl SnbPlugin for TGAdapter {
         context::set_bot(ctx);
         context::set_plugin(self.name());
 
+        // Sweep outgoing temp files (base64 uploads / renames) left behind if
+        // a previous run died between write and send.
+        let _ = std::fs::remove_dir_all(context::plugin().data_dir().join("outbox"));
+
         match context::plugin().load_config(Path::new("config.toml")) {
             Ok(content) => match toml::from_str::<Config>(&content) {
                 Ok(config) => state::set_config(config),
@@ -96,6 +100,13 @@ struct TelegramAdapter;
 impl Adapter for TelegramAdapter {
     fn run(&self, bot: Arc<dyn BotContext>) {
         run_async(dispatcher::run(bot));
+    }
+
+    fn stop(&self) {
+        // Trip the flag + wake the in-flight long poll so `run` returns inside
+        // the host's ~1s unload drain window (this adapter previously had no
+        // stop() and was always leaked on unload).
+        state::signal_stop();
     }
 
     fn send(&self, event: &Event) -> anyhow::Result<()> {
