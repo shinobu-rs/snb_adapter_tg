@@ -5,6 +5,7 @@ use frankenstein::AsyncTelegramApi;
 use frankenstein::client_reqwest::Bot;
 use frankenstein::methods::{DeleteWebhookParams, GetUpdatesParams};
 use frankenstein::types::AllowedUpdate;
+use frankenstein::updates::Update;
 use snb_core::context::BotContext;
 use tokio::sync::Notify;
 
@@ -64,6 +65,38 @@ fn build_bot(token: &str, api_url: Option<&str>) -> Bot {
             Bot::builder().api_url(url).build()
         }
     }
+}
+
+/// Recover per-element from a batch that failed typed deserialization.
+///
+/// Why this exists: `allowed_updates` is not retroactive (the first poll after
+/// an upgrade can deliver kinds queued under the previous subscription) and
+/// several payload enums (e.g. `ChatType`) are closed with no unknown-variant
+/// fallback — one bad element otherwise fails the whole
+/// `MethodResponse<Vec<Update>>` decode, and since the offset then never
+/// advances, the same poison batch would replay forever at full poll rate.
+/// `Error::JsonDecode` carries the raw body, so parse each element
+/// individually and always advance past every element we saw.
+pub(crate) fn salvage_updates(input: &str) -> (Vec<Update>, Option<i64>) {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(input) else {
+        return (Vec::new(), None);
+    };
+    let Some(items) = value.get("result").and_then(serde_json::Value::as_array) else {
+        return (Vec::new(), None);
+    };
+
+    let mut updates = Vec::new();
+    let mut next_offset: Option<i64> = None;
+    for item in items {
+        if let Some(id) = item.get("update_id").and_then(serde_json::Value::as_i64) {
+            next_offset = Some(next_offset.map_or(id + 1, |cur| cur.max(id + 1)));
+        }
+        match serde_json::from_value::<Update>(item.clone()) {
+            Ok(update) => updates.push(update),
+            Err(e) => log::warn!("TGAdapter skipping unparseable update: {e}"),
+        }
+    }
+    (updates, next_offset)
 }
 
 pub(crate) async fn run(bot_ctx: Arc<dyn BotContext>) {
@@ -146,6 +179,26 @@ pub(crate) async fn run(bot_ctx: Arc<dyn BotContext>) {
                     backoff = (backoff * 2).min(MAX_BACKOFF);
                 }
             },
+            Err(frankenstein::Error::JsonDecode { source, input }) => {
+                log::warn!("TGAdapter getUpdates decode error ({source}); salvaging batch");
+                let (updates, next_offset) = salvage_updates(&input);
+                let salvaged = updates.len();
+                for update in updates {
+                    if let Some(event) = convert_update(&update) {
+                        bot_ctx.emit_event(event);
+                    }
+                }
+                if let Some(offset) = next_offset {
+                    params.offset = Some(offset);
+                    backoff = Duration::from_secs(1);
+                    log::warn!("TGAdapter salvaged {salvaged} update(s); offset -> {offset}");
+                } else {
+                    // Not a getUpdates body at all (proxy error page etc.):
+                    // treat as transport failure.
+                    sleep_or_stop(&notify, backoff).await;
+                    backoff = (backoff * 2).min(MAX_BACKOFF);
+                }
+            }
             Err(e) => {
                 log::error!("TGAdapter getUpdates transport error: {e}");
                 sleep_or_stop(&notify, backoff).await;
@@ -163,3 +216,7 @@ async fn sleep_or_stop(notify: &Notify, duration: Duration) {
         () = tokio::time::sleep(duration) => {}
     }
 }
+
+#[cfg(test)]
+#[path = "../tests/unit/salvage_tests.rs"]
+mod salvage_tests;
