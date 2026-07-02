@@ -11,6 +11,7 @@ mod dispatcher;
 mod outgoing;
 mod state;
 mod task;
+mod utf16;
 
 use std::path::Path;
 use std::sync::Arc;
