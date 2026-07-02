@@ -227,6 +227,25 @@ impl OutgoingText {
     }
 }
 
+/// Retry a send exactly once when Telegram answers 429, honoring retry_after.
+/// (No general retry policy — errors still log-and-continue like before.)
+macro_rules! send_with_429_retry {
+    ($bot:expr, $method:ident, $params:expr) => {{
+        match $bot.$method($params).await {
+            Err(frankenstein::Error::Api(ref e)) if e.error_code == 429 => {
+                let wait = e.parameters.as_ref().and_then(|p| p.retry_after).unwrap_or(5);
+                log::warn!(
+                    "TGAdapter {} rate-limited; retrying once in {wait}s",
+                    stringify!($method)
+                );
+                tokio::time::sleep(std::time::Duration::from_secs(u64::from(wait))).await;
+                $bot.$method($params).await
+            }
+            other => other,
+        }
+    }};
+}
+
 async fn send_text(
     bot: &Bot,
     chat_id: i64,
@@ -240,7 +259,7 @@ async fn send_text(
         .maybe_parse_mode(text.format.map(parse_mode_from_format))
         .maybe_reply_parameters(reply_parameters(reply_to))
         .build();
-    match bot.send_message(&params).await {
+    match send_with_429_retry!(bot, send_message, &params) {
         Ok(resp) => {
             let id = resp.result.message_id;
             schedule_delete_after(bot, chat_id, id, delete_after);
@@ -279,7 +298,7 @@ async fn send_file(
         .maybe_parse_mode(caption_mode)
         .maybe_reply_parameters(reply_parameters(reply_to))
         .build();
-    let result = bot.send_document(&params).await;
+    let result = send_with_429_retry!(bot, send_document, &params);
     cleanup_outbox(cleanup.as_deref());
     match result {
         Ok(resp) => {
@@ -319,7 +338,7 @@ async fn send_image(
         .maybe_parse_mode(caption_mode)
         .maybe_reply_parameters(reply_parameters(reply_to))
         .build();
-    let result = bot.send_photo(&params).await;
+    let result = send_with_429_retry!(bot, send_photo, &params);
     cleanup_outbox(cleanup.as_deref());
     match result {
         Ok(resp) => {
@@ -441,7 +460,7 @@ async fn send_file_media_group(
         .media(media)
         .maybe_reply_parameters(reply_parameters(reply_to))
         .build();
-    let result = bot.send_media_group(&params).await;
+    let result = send_with_429_retry!(bot, send_media_group, &params);
     for c in &cleanups {
         cleanup_outbox(Some(c.as_path()));
     }
