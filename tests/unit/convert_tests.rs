@@ -135,3 +135,35 @@ fn largest_photo_size_wins() {
     let content = ev.message.expect("message").content;
     assert!(content.iter().any(|c| matches!(c, ContentItem::Image { file_id: Some(id), .. } if id == "big")));
 }
+
+#[test]
+fn text_mention_reads_sibling_user_field() {
+    // TextMention's user is a sibling field on the entity (not embedded in the
+    // kind like teloxide); it must land in `at` as the user id.
+    let ev = convert_update(&update(
+        r#"{"update_id":1,"message":{
+            "message_id":1,"date":0,
+            "chat":{"id":5,"type":"private"},
+            "text":"你好 Alice",
+            "entities":[{"type":"text_mention","offset":3,"length":5,
+                "user":{"id":99,"is_bot":false,"first_name":"Alice"}}]}}"#,
+    ))
+    .expect("event");
+    assert_eq!(ev.message.expect("message").at, vec!["99"]);
+}
+
+#[test]
+fn malformed_entity_offset_is_ignored_not_panicking() {
+    // Adversarial offsets past the end (or splitting a surrogate) must be
+    // skipped: no command extracted, event still a plain Message.
+    let ev = convert_update(&update(
+        r#"{"update_id":1,"message":{
+            "message_id":1,"date":0,
+            "chat":{"id":5,"type":"private"},
+            "text":"hi",
+            "entities":[{"type":"bot_command","offset":50,"length":4}]}}"#,
+    ))
+    .expect("event");
+    assert!(matches!(ev.event_type, EventType::Message));
+    assert!(ev.command.is_none());
+}

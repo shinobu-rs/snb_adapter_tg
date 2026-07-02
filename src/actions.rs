@@ -94,11 +94,17 @@ async fn run_action(bot: Bot, method: String, data: String, reply_plugin: Option
             action!(bot, data, AnswerCallbackQueryParams, answer_callback_query)
         }
         "get_chat" => action!(bot, data, GetChatParams, get_chat),
-        // dispatch() already rejected anything else.
-        other => {
-            log::error!("TGAdapter action '{other}' passed dispatch but has no arm");
-            return;
-        }
+        // dispatch() already rejected anything else. Fall through to the
+        // normal (ok, payload) path below instead of returning early, so the
+        // `if !ok` log (single error log, no double-logging) and the
+        // reply_plugin response-emission still run — otherwise a requesting
+        // plugin that set reply_plugin would wait forever on a desync.
+        other => (
+            false,
+            serde_json::Value::String(format!(
+                "no handler for '{other}' (whitelist/handler desync)"
+            )),
+        ),
     };
 
     if !ok {
