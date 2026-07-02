@@ -167,3 +167,26 @@ fn malformed_entity_offset_is_ignored_not_panicking() {
     assert!(matches!(ev.event_type, EventType::Message));
     assert!(ev.command.is_none());
 }
+
+#[test]
+fn edited_message_with_command_is_passthrough_not_command() {
+    // setChatMemberTag re-delivers history as edited_message updates; a command
+    // in an edited message must NOT re-fire — it downgrades to Other passthrough.
+    let ev = convert_update(&update(
+        r#"{"update_id":1,"edited_message":{
+            "message_id":1,"date":0,"edit_date":1,
+            "chat":{"id":5,"type":"private"},
+            "from":{"id":7,"is_bot":false,"first_name":"u"},
+            "text":"/dump http://x",
+            "entities":[{"type":"bot_command","offset":0,"length":5}]}}"#,
+    ))
+    .expect("event");
+    match &ev.event_type {
+        EventType::Other(kind) => assert_eq!(kind, "EditedMessage"),
+        other => panic!("expected Other(EditedMessage), got {other:?}"),
+    }
+    assert!(ev.command.is_none(), "edited message must not carry a command");
+    // Structured message is preserved for opt-in observers.
+    assert!(ev.message.is_some(), "edited message payload should be preserved");
+    assert_eq!(ev.data, "EditedMessage");
+}

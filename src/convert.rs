@@ -12,11 +12,11 @@ use crate::utf16::Utf16Index;
 pub(crate) fn convert_update(update: &Update) -> Option<Event> {
     match &update.content {
         UpdateContent::Message(msg) => convert_message("Message", msg),
-        UpdateContent::EditedMessage(msg) => convert_message("EditedMessage", msg),
+        UpdateContent::EditedMessage(msg) => convert_edit("EditedMessage", msg),
         UpdateContent::ChannelPost(msg) => convert_message("ChannelPost", msg),
-        UpdateContent::EditedChannelPost(msg) => convert_message("EditedChannelPost", msg),
+        UpdateContent::EditedChannelPost(msg) => convert_edit("EditedChannelPost", msg),
         UpdateContent::BusinessMessage(msg) => convert_message("BusinessMessage", msg),
-        UpdateContent::EditedBusinessMessage(msg) => convert_message("EditedBusinessMessage", msg),
+        UpdateContent::EditedBusinessMessage(msg) => convert_edit("EditedBusinessMessage", msg),
         // Bot API 10.0: messages from chats the bot is not a member of. Routed
         // like a normal message (user decision) so commands work in guest chats.
         UpdateContent::GuestMessage(msg) => convert_message("GuestMessage", msg),
@@ -276,6 +276,23 @@ fn convert_message(kind_name: &str, msg: &frankenstein::types::Message) -> Optio
         reply_plugin: Some("TGAdapter".to_string()),
         target_plugin: None,
     })
+}
+
+/// Downgrade an incoming edited message to a passthrough `Other` event.
+///
+/// Telegram re-delivers a member's whole history as `edited_message` updates
+/// whenever their `sender_tag` changes (e.g. `setChatMemberTag`) — the message
+/// content is unchanged, only a metadata field. Treating those as new
+/// commands/messages re-fires handlers on the entire history. An edit is not a
+/// new command: reuse `convert_message`'s parsing for the structured payload,
+/// but emit it as `Other(kind)` with no command, so `dispatch_command` and
+/// message handlers ignore it while a plugin that cares about edits can still
+/// observe it through `on_event`.
+fn convert_edit(kind_name: &str, msg: &frankenstein::types::Message) -> Option<Event> {
+    let mut event = convert_message(kind_name, msg)?;
+    event.event_type = EventType::Other(kind_name.to_string());
+    event.command = None;
+    Some(event)
 }
 
 #[cfg(test)]
