@@ -11,7 +11,6 @@ mod convert;
 mod dispatcher;
 mod outgoing;
 mod state;
-mod task;
 mod utf16;
 
 use std::path::Path;

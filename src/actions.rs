@@ -38,7 +38,7 @@ pub(crate) fn dispatch(method: &str, event: &Event) -> anyhow::Result<()> {
     let method = method.to_string();
     let data = event.data.clone();
     let reply_plugin = event.reply_plugin.clone();
-    crate::task::spawn(async move {
+    snb_core::task::spawn(async move {
         run_action(bot, method, data, reply_plugin).await;
     });
     Ok(())

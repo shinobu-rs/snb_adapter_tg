@@ -76,7 +76,7 @@ pub(crate) fn sync_commands() {
     let menu = partition_commands(&specs);
     let admin_ids = state::admin_ids();
 
-    crate::task::spawn(async move {
+    snb_core::task::spawn(async move {
         let params = SetMyCommandsParams::builder()
             .commands(menu.default)
             .scope(BotCommandScope::Default)

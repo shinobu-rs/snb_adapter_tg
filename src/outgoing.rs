@@ -45,7 +45,7 @@ pub(crate) fn send_event(event: &Event) -> anyhow::Result<()> {
     let origin = event.source.clone();
     let msg = msg.clone();
 
-    crate::task::spawn(async move {
+    snb_core::task::spawn(async move {
         match event_type {
             EventType::Message => send_message_items(bot, chat_id, msg, origin).await,
             EventType::MessageEdit => edit_message_item(bot, chat_id, msg).await,
@@ -569,7 +569,7 @@ fn schedule_delete_after(bot: &Bot, chat_id: i64, message_id: i32, delay: Option
     };
 
     let bot = bot.clone();
-    crate::task::spawn(async move {
+    snb_core::task::spawn(async move {
         tokio::time::sleep(delay).await;
         let params = DeleteMessageParams::builder()
             .chat_id(chat_id)
