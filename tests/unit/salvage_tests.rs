@@ -28,3 +28,13 @@ fn missing_result_array_yields_nothing() {
     assert!(updates.is_empty());
     assert_eq!(next_offset, None);
 }
+
+#[test]
+fn huge_update_id_saturates_instead_of_panicking() {
+    // update_id is attacker-influenced JSON; i64::MAX + 1 must not overflow.
+    let input = r#"{"ok":true,"result":[
+        {"update_id":9223372036854775807,"message":{"message_id":1,"date":0,"chat":{"id":5,"type":"private"},"text":"hi"}}
+    ]}"#;
+    let (_updates, next_offset) = salvage_updates(input);
+    assert_eq!(next_offset, Some(i64::MAX)); // saturated, no panic
+}
