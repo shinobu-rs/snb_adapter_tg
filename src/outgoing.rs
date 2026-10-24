@@ -253,10 +253,11 @@ async fn send_text(
     reply_to: Option<&str>,
     delete_after: Option<Duration>,
 ) -> Vec<i32> {
+    let parse_mode = text.format.map(parse_mode_from_format);
     let params = SendMessageParams::builder()
         .chat_id(chat_id)
-        .text(text.text)
-        .maybe_parse_mode(text.format.map(parse_mode_from_format))
+        .text(&text.text)
+        .maybe_parse_mode(parse_mode)
         .maybe_reply_parameters(reply_parameters(reply_to))
         .build();
     match send_with_429_retry!(bot, send_message, &params) {
@@ -264,6 +265,25 @@ async fn send_text(
             let id = resp.result.message_id;
             schedule_delete_after(bot, chat_id, id, delete_after);
             vec![id]
+        }
+        Err(e) if parse_mode.is_some() => {
+            log::warn!("TGAdapter send_message parse_mode failed ({e}); falling back to plain text");
+            let fallback_params = SendMessageParams::builder()
+                .chat_id(chat_id)
+                .text(text.text)
+                .maybe_reply_parameters(reply_parameters(reply_to))
+                .build();
+            match send_with_429_retry!(bot, send_message, &fallback_params) {
+                Ok(resp) => {
+                    let id = resp.result.message_id;
+                    schedule_delete_after(bot, chat_id, id, delete_after);
+                    vec![id]
+                }
+                Err(err) => {
+                    log::error!("TGAdapter send_message fallback error: {err}");
+                    Vec::new()
+                }
+            }
         }
         Err(e) => {
             log::error!("TGAdapter send_message error: {e}");
