@@ -190,3 +190,44 @@ fn edited_message_with_command_is_passthrough_not_command() {
     assert!(ev.message.is_some(), "edited message payload should be preserved");
     assert_eq!(ev.data, "EditedMessage");
 }
+
+#[test]
+fn converts_formatted_entities_to_html_content() {
+    let ev = convert_update(&update(
+        r#"{"update_id":1,"message":{
+            "message_id":1,"date":0,
+            "chat":{"id":5,"type":"private"},
+            "from":{"id":7,"is_bot":false,"first_name":"u"},
+            "text":"hello bold world",
+            "entities":[{"type":"bold","offset":6,"length":4}]}}"#,
+    ))
+    .expect("event");
+    let msg = ev.message.expect("message");
+    assert_eq!(msg.content.len(), 1);
+    match &msg.content[0] {
+        ContentItem::Text { text, format } => {
+            assert_eq!(text, "hello <b>bold</b> world");
+            assert_eq!(*format, Some(snb_core::event::TextFormat::Html));
+        }
+        other => panic!("expected Text, got {other:?}"),
+    }
+}
+
+#[test]
+fn extracts_command_with_formatted_args() {
+    let ev = convert_update(&update(
+        r#"{"update_id":1,"message":{
+            "message_id":1,"date":0,
+            "chat":{"id":5,"type":"private"},
+            "from":{"id":7,"is_bot":false,"first_name":"u"},
+            "text":"/echo hello bold",
+            "entities":[
+                {"type":"bot_command","offset":0,"length":5},
+                {"type":"bold","offset":12,"length":4}
+            ]}}"#,
+    ))
+    .expect("event");
+    let cmd = ev.command.expect("command");
+    assert_eq!(cmd.cmd, "echo");
+    assert_eq!(cmd.args, "hello <b>bold</b>");
+}
