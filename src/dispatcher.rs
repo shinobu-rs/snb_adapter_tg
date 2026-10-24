@@ -16,7 +16,7 @@ use crate::state;
 /// narrowing between getUpdates calls, and the server default EXCLUDES
 /// chat_member / message_reaction / message_reaction_count — so always send
 /// the complete list. Revisit on frankenstein upgrades (new variants).
-const ALL_UPDATES: [AllowedUpdate; 25] = [
+const ALL_UPDATES: [AllowedUpdate; 27] = [
     AllowedUpdate::Message,
     AllowedUpdate::EditedMessage,
     AllowedUpdate::ChannelPost,
@@ -42,6 +42,8 @@ const ALL_UPDATES: [AllowedUpdate; 25] = [
     AllowedUpdate::ChatBoost,
     AllowedUpdate::RemovedChatBoost,
     AllowedUpdate::ManagedBot,
+    AllowedUpdate::Subscription,
+    AllowedUpdate::StoppedMessageGeneration,
 ];
 
 const POLL_TIMEOUT_SECS: u32 = 30;

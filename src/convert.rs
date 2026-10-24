@@ -66,7 +66,9 @@ fn other_kind_name(content: &UpdateContent) -> &'static str {
         UpdateContent::ChatBoost(_) => "ChatBoost",
         UpdateContent::RemovedChatBoost(_) => "RemovedChatBoost",
         UpdateContent::ManagedBot(_) => "ManagedBot",
-        // UpdateContent is not #[non_exhaustive] in 0.50.1; if a crate upgrade
+        UpdateContent::Subscription(_) => "Subscription",
+        UpdateContent::StoppedMessageGeneration(_) => "StoppedMessageGeneration",
+        // UpdateContent is not #[non_exhaustive] in 0.52.1; if a crate upgrade
         // adds variants the compiler will point here.
     }
 }
