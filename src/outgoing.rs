@@ -249,6 +249,8 @@ macro_rules! send_with_429_retry {
 fn has_rich_features(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
     lower.contains("<table")
+        || lower.contains("<tg-collage")
+        || lower.contains("<tg-slideshow")
         || lower.contains("<h1")
         || lower.contains("<h2")
         || lower.contains("<h3")
@@ -268,6 +270,29 @@ fn has_rich_features(text: &str) -> bool {
                 || t.starts_with("###### ")
         })
         || (text.contains('|') && (text.contains("|-") || text.contains("-|") || text.contains("|:")))
+}
+
+fn sanitize_collage_for_plain_message(text: &str) -> String {
+    if !text.contains("<tg-collage") && !text.contains("<tg-slideshow") {
+        return text.to_string();
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find("<tg-collage").or_else(|| rest.find("<tg-slideshow")) {
+        out.push_str(&rest[..start]);
+        let after = &rest[start..];
+        let close_tag = if after.starts_with("<tg-collage") { "</tg-collage>" } else { "</tg-slideshow>" };
+        if let Some(end) = after.find(close_tag) {
+            let _block = &after[..end + close_tag.len()];
+            out.push_str("\n[图片合集/预览]\n");
+            rest = &after[end + close_tag.len()..];
+        } else {
+            out.push_str(&after[..1]);
+            rest = &after[1..];
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 async fn send_text(
@@ -317,9 +342,10 @@ async fn send_text(
         }
         Err(e) if parse_mode.is_some() => {
             log::warn!("TGAdapter send_message parse_mode failed ({e}); falling back to plain text");
+            let plain = sanitize_collage_for_plain_message(&text.text);
             let fallback_params = SendMessageParams::builder()
                 .chat_id(chat_id)
-                .text(text.text)
+                .text(plain)
                 .maybe_reply_parameters(reply_parameters(reply_to))
                 .build();
             match send_with_429_retry!(bot, send_message, &fallback_params) {
