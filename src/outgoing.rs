@@ -11,9 +11,8 @@ use frankenstein::input_file::FileUpload;
 use frankenstein::input_media::{InputMediaDocument, MediaGroupInputMedia};
 use frankenstein::methods::{
     DeleteMessageParams, EditMessageTextParams, SendDocumentParams, SendMediaGroupParams,
-    SendMessageParams, SendPhotoParams, SendRichMessageParams,
+    SendMessageParams, SendPhotoParams,
 };
-use frankenstein::rich_message::InputRichMessage;
 use frankenstein::types::ReplyParameters;
 use snb_core::context;
 use snb_core::event::{
@@ -246,55 +245,6 @@ macro_rules! send_with_429_retry {
         }
     }};
 }
-fn has_rich_features(text: &str) -> bool {
-    let lower = text.to_ascii_lowercase();
-    lower.contains("<table")
-        || lower.contains("<tg-collage")
-        || lower.contains("<tg-slideshow")
-        || lower.contains("<h1")
-        || lower.contains("<h2")
-        || lower.contains("<h3")
-        || lower.contains("<h4")
-        || lower.contains("<h5")
-        || lower.contains("<h6")
-        || lower.contains("<details")
-        || lower.contains("<tg-math")
-        || lower.contains("<tg-button")
-        || text.lines().any(|l| {
-            let t = l.trim_start();
-            t.starts_with("# ")
-                || t.starts_with("## ")
-                || t.starts_with("### ")
-                || t.starts_with("#### ")
-                || t.starts_with("##### ")
-                || t.starts_with("###### ")
-        })
-        || (text.contains('|') && (text.contains("|-") || text.contains("-|") || text.contains("|:")))
-}
-
-fn sanitize_collage_for_plain_message(text: &str) -> String {
-    if !text.contains("<tg-collage") && !text.contains("<tg-slideshow") {
-        return text.to_string();
-    }
-    let mut out = String::with_capacity(text.len());
-    let mut rest = text;
-    while let Some(start) = rest.find("<tg-collage").or_else(|| rest.find("<tg-slideshow")) {
-        out.push_str(&rest[..start]);
-        let after = &rest[start..];
-        let close_tag = if after.starts_with("<tg-collage") { "</tg-collage>" } else { "</tg-slideshow>" };
-        if let Some(end) = after.find(close_tag) {
-            let _block = &after[..end + close_tag.len()];
-            out.push_str("\n[图片合集/预览]\n");
-            rest = &after[end + close_tag.len()..];
-        } else {
-            out.push_str(&after[..1]);
-            rest = &after[1..];
-        }
-    }
-    out.push_str(rest);
-    out
-}
-
 async fn send_text(
     bot: &Bot,
     chat_id: i64,
@@ -302,31 +252,6 @@ async fn send_text(
     reply_to: Option<&str>,
     delete_after: Option<Duration>,
 ) -> Vec<i32> {
-    if has_rich_features(&text.text) {
-        let is_html = text.format == Some(TextFormat::Html)
-            || text.text.contains('<') && text.text.contains('>');
-        let rich_message = if is_html {
-            InputRichMessage::builder().html(text.text.clone()).build()
-        } else {
-            InputRichMessage::builder().markdown(text.text.clone()).build()
-        };
-        let params = SendRichMessageParams::builder()
-            .chat_id(chat_id)
-            .rich_message(rich_message)
-            .maybe_reply_parameters(reply_parameters(reply_to))
-            .build();
-        match send_with_429_retry!(bot, send_rich_message, &params) {
-            Ok(resp) => {
-                let id = resp.result.message_id;
-                schedule_delete_after(bot, chat_id, id, delete_after);
-                return vec![id];
-            }
-            Err(e) => {
-                log::warn!("TGAdapter send_rich_message failed ({e}); falling back to send_message");
-            }
-        }
-    }
-
     let parse_mode = text.format.map(parse_mode_from_format);
     let params = SendMessageParams::builder()
         .chat_id(chat_id)
@@ -342,10 +267,9 @@ async fn send_text(
         }
         Err(e) if parse_mode.is_some() => {
             log::warn!("TGAdapter send_message parse_mode failed ({e}); falling back to plain text");
-            let plain = sanitize_collage_for_plain_message(&text.text);
             let fallback_params = SendMessageParams::builder()
                 .chat_id(chat_id)
-                .text(plain)
+                .text(text.text)
                 .maybe_reply_parameters(reply_parameters(reply_to))
                 .build();
             match send_with_429_retry!(bot, send_message, &fallback_params) {
@@ -366,6 +290,7 @@ async fn send_text(
         }
     }
 }
+
 
 async fn send_file(
     bot: &Bot,

@@ -166,14 +166,8 @@ fn convert_message(kind_name: &str, msg: &frankenstein::types::Message) -> Optio
             )
         };
     let idx = Utf16Index::new(text);
-    let formatted_html = render_entities_to_html(text, entities, 0, text.len(), &idx);
     let mut content = if text.is_empty() {
         vec![]
-    } else if let Some(html) = &formatted_html {
-        vec![ContentItem::formatted_text(
-            html.clone(),
-            snb_core::event::TextFormat::Html,
-        )]
     } else {
         vec![ContentItem::text(text)]
     };
@@ -241,19 +235,10 @@ fn convert_message(kind_name: &str, msg: &frankenstein::types::Message) -> Optio
                     let raw = &text[r.clone()];
                     let stripped = raw.strip_prefix('/').unwrap_or(raw);
                     let cmd = stripped.split('@').next().unwrap_or(stripped);
-                    let remaining = &text[r.end..];
-                    let trimmed_args = remaining.trim_start();
-                    let leading_spaces = remaining.len() - trimmed_args.len();
-                    let args_start = r.end + leading_spaces;
-                    let args = if args_start < text.len() {
-                        render_entities_to_html(text, entities, args_start, text.len(), &idx)
-                            .unwrap_or_else(|| trimmed_args.to_string())
-                    } else {
-                        String::new()
-                    };
+                    let args = text[r.end..].trim_start();
                     command = Some(snb_core::event::Command {
                         cmd: cmd.to_string(),
-                        args,
+                        args: args.to_string(),
                     });
                 }
             }
@@ -309,161 +294,6 @@ fn convert_edit(kind_name: &str, msg: &frankenstein::types::Message) -> Option<E
     event.command = None;
     Some(event)
 }
-
-fn escape_html(text: &str, out: &mut String) {
-    for ch in text.chars() {
-        match ch {
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            _ => out.push(ch),
-        }
-    }
-}
-
-fn escape_html_attr(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    for ch in text.chars() {
-        match ch {
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            '"' => out.push_str("&quot;"),
-            _ => out.push(ch),
-        }
-    }
-    out
-}
-
-struct HtmlSpan {
-    start: usize,
-    end: usize,
-    open: String,
-    close: String,
-}
-
-fn formatting_tags_for_entity(entity: &frankenstein::types::MessageEntity) -> Option<(String, String)> {
-    match entity.type_field {
-        MessageEntityType::Bold => Some(("<b>".to_string(), "</b>".to_string())),
-        MessageEntityType::Italic => Some(("<i>".to_string(), "</i>".to_string())),
-        MessageEntityType::Underline => Some(("<u>".to_string(), "</u>".to_string())),
-        MessageEntityType::Strikethrough => Some(("<s>".to_string(), "</s>".to_string())),
-        MessageEntityType::Spoiler => Some(("<tg-spoiler>".to_string(), "</tg-spoiler>".to_string())),
-        MessageEntityType::Code => Some(("<code>".to_string(), "</code>".to_string())),
-        MessageEntityType::Pre => {
-            if let Some(lang) = entity.language.as_deref() {
-                Some((
-                    format!("<pre><code class=\"language-{}\">", escape_html_attr(lang)),
-                    "</code></pre>".to_string(),
-                ))
-            } else {
-                Some(("<pre>".to_string(), "</pre>".to_string()))
-            }
-        }
-        MessageEntityType::Blockquote => Some(("<blockquote>".to_string(), "</blockquote>".to_string())),
-        MessageEntityType::ExpandableBlockquote => {
-            Some(("<blockquote expandable>".to_string(), "</blockquote>".to_string()))
-        }
-        MessageEntityType::TextLink => {
-            let url = entity.url.as_deref()?;
-            Some((
-                format!("<a href=\"{}\">", escape_html_attr(url)),
-                "</a>".to_string(),
-            ))
-        }
-        MessageEntityType::CustomEmoji => {
-            let id = entity.custom_emoji_id.as_deref()?;
-            Some((
-                format!("<tg-emoji emoji-id=\"{}\">", escape_html_attr(id)),
-                "</tg-emoji>".to_string(),
-            ))
-        }
-        _ => None,
-    }
-}
-
-pub(crate) fn render_entities_to_html(
-    text: &str,
-    entities: &[frankenstein::types::MessageEntity],
-    start_byte: usize,
-    end_byte: usize,
-    idx: &Utf16Index,
-) -> Option<String> {
-    if entities.is_empty() || start_byte >= end_byte || end_byte > text.len() {
-        return None;
-    }
-
-    let mut spans = Vec::new();
-    for entity in entities {
-        let (open, close) = match formatting_tags_for_entity(entity) {
-            Some(tags) => tags,
-            None => continue,
-        };
-        let r = match idx.byte_range(entity.offset, entity.length) {
-            Some(r) => r,
-            None => continue,
-        };
-        let span_start = r.start.max(start_byte);
-        let span_end = r.end.min(end_byte);
-        if span_start < span_end {
-            spans.push(HtmlSpan {
-                start: span_start,
-                end: span_end,
-                open,
-                close,
-            });
-        }
-    }
-
-    if spans.is_empty() {
-        return None;
-    }
-
-    enum TagEvent<'a> {
-        Open { tag: &'a str, span_len: usize },
-        Close { tag: &'a str, span_len: usize },
-    }
-
-    let mut events: Vec<(usize, TagEvent)> = Vec::with_capacity(spans.len() * 2);
-    for span in &spans {
-        let span_len = span.end - span.start;
-        events.push((span.start, TagEvent::Open { tag: &span.open, span_len }));
-        events.push((span.end, TagEvent::Close { tag: &span.close, span_len }));
-    }
-
-    events.sort_by(|(pos_a, ev_a), (pos_b, ev_b)| {
-        if pos_a != pos_b {
-            return pos_a.cmp(pos_b);
-        }
-        match (ev_a, ev_b) {
-            (TagEvent::Close { span_len: l1, .. }, TagEvent::Close { span_len: l2, .. }) => l1.cmp(l2),
-            (TagEvent::Close { .. }, TagEvent::Open { .. }) => std::cmp::Ordering::Less,
-            (TagEvent::Open { .. }, TagEvent::Close { .. }) => std::cmp::Ordering::Greater,
-            (TagEvent::Open { span_len: l1, .. }, TagEvent::Open { span_len: l2, .. }) => l2.cmp(l1),
-        }
-    });
-
-    let mut out = String::with_capacity(end_byte - start_byte + spans.len() * 16);
-    let mut last_pos = start_byte;
-
-    for (pos, ev) in events {
-        if pos > last_pos {
-            escape_html(&text[last_pos..pos], &mut out);
-            last_pos = pos;
-        }
-        match ev {
-            TagEvent::Open { tag, .. } => out.push_str(tag),
-            TagEvent::Close { tag, .. } => out.push_str(tag),
-        }
-    }
-
-    if last_pos < end_byte {
-        escape_html(&text[last_pos..end_byte], &mut out);
-    }
-
-    Some(out)
-}
-
 #[cfg(test)]
 #[path = "../tests/unit/convert_tests.rs"]
 mod convert_tests;
