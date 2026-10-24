@@ -11,8 +11,9 @@ use frankenstein::input_file::FileUpload;
 use frankenstein::input_media::{InputMediaDocument, MediaGroupInputMedia};
 use frankenstein::methods::{
     DeleteMessageParams, EditMessageTextParams, SendDocumentParams, SendMediaGroupParams,
-    SendMessageParams, SendPhotoParams,
+    SendMessageParams, SendPhotoParams, SendRichMessageParams,
 };
+use frankenstein::rich_message::InputRichMessage;
 use frankenstein::types::ReplyParameters;
 use snb_core::context;
 use snb_core::event::{
@@ -245,6 +246,29 @@ macro_rules! send_with_429_retry {
         }
     }};
 }
+fn has_rich_features(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    lower.contains("<table")
+        || lower.contains("<h1")
+        || lower.contains("<h2")
+        || lower.contains("<h3")
+        || lower.contains("<h4")
+        || lower.contains("<h5")
+        || lower.contains("<h6")
+        || lower.contains("<details")
+        || lower.contains("<tg-math")
+        || lower.contains("<tg-button")
+        || text.lines().any(|l| {
+            let t = l.trim_start();
+            t.starts_with("# ")
+                || t.starts_with("## ")
+                || t.starts_with("### ")
+                || t.starts_with("#### ")
+                || t.starts_with("##### ")
+                || t.starts_with("###### ")
+        })
+        || (text.contains('|') && (text.contains("|-") || text.contains("-|") || text.contains("|:")))
+}
 
 async fn send_text(
     bot: &Bot,
@@ -253,6 +277,31 @@ async fn send_text(
     reply_to: Option<&str>,
     delete_after: Option<Duration>,
 ) -> Vec<i32> {
+    if has_rich_features(&text.text) {
+        let is_html = text.format == Some(TextFormat::Html)
+            || text.text.contains('<') && text.text.contains('>');
+        let rich_message = if is_html {
+            InputRichMessage::builder().html(text.text.clone()).build()
+        } else {
+            InputRichMessage::builder().markdown(text.text.clone()).build()
+        };
+        let params = SendRichMessageParams::builder()
+            .chat_id(chat_id)
+            .rich_message(rich_message)
+            .maybe_reply_parameters(reply_parameters(reply_to))
+            .build();
+        match send_with_429_retry!(bot, send_rich_message, &params) {
+            Ok(resp) => {
+                let id = resp.result.message_id;
+                schedule_delete_after(bot, chat_id, id, delete_after);
+                return vec![id];
+            }
+            Err(e) => {
+                log::warn!("TGAdapter send_rich_message failed ({e}); falling back to send_message");
+            }
+        }
+    }
+
     let parse_mode = text.format.map(parse_mode_from_format);
     let params = SendMessageParams::builder()
         .chat_id(chat_id)
